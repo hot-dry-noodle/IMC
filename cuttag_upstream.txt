@@ -1,0 +1,178 @@
+# 1.要求
+#liunx系统
+FastQC(version >= 0.11.9) [Optional]
+Bowtie2 (version >= 2.3.4.3)
+samtools (version >= 1.10)
+bedtools (version >= 2.29.1)
+Picard (version >= 2.18.29)
+SEACR (version >= 1.3)
+deepTools (version >= 2.0)
+
+
+
+
+#2.数据下载和文件夹建立
+mkdir /home/wyydata/wangyuyao/CUT_TAG_Exp
+projPath="/home/wyydata/wangyuyao/CUT_TAG_Exp" 
+group=("H3K9ac_Pi1" "H3K9ac_Pi2" "Pi_IgG" "H3K9ac_D1" "H3K9ac_D2" "Drug_IgG")
+#设置储存的文件夹
+for org in ${group[@]}; do
+mkdir -p $projPath/data/${org} 
+mkdir -p $projPath/fasta/${org}
+mkdir -p ${projPath}/fastqFileQC/${org} 
+done
+raw="/home/wyydata/wangyuyao/cuttagraw/cuttag241028/PFdata_dir"
+#复制文件
+cp ${raw}/Pi1_R1.fastq.gz ${projPath}/data/H3K9ac_Pi1/R1.fastq.gz
+cp ${raw}/Pi1_R2.fastq.gz ${projPath}/data/H3K9ac_Pi1/R2.fastq.gz
+cp ${raw}/Pi2_R1.fastq.gz ${projPath}/data/H3K9ac_Pi2/R1.fastq.gz
+cp ${raw}/Pi2_R2.fastq.gz ${projPath}/data/H3K9ac_Pi2/R2.fastq.gz
+cp ${raw}/D1_R1.fastq.gz ${projPath}/data/H3K9ac_D1/R1.fastq.gz
+cp ${raw}/D1_R2.fastq.gz ${projPath}/data/H3K9ac_D1/R2.fastq.gz
+cp ${raw}/D2_R1.fastq.gz ${projPath}/data/H3K9ac_D2/R1.fastq.gz
+cp ${raw}/D2_R2.fastq.gz ${projPath}/data/H3K9ac_D2/R2.fastq.gz
+cp ${raw}/PiG_R1.fastq.gz ${projPath}/data/Pi_IgG/R1.fastq.gz
+cp ${raw}/PiG_R2.fastq.gz ${projPath}/data/Pi_IgG/R2.fastq.gz
+cp ${raw}/DG_R1.fastq.gz ${projPath}/data/Drug_IgG/R1.fastq.gz
+cp ${raw}/DG_R2.fastq.gz ${projPath}/data/Drug_IgG/R2.fastq.gz
+
+#质控
+for org in ${group[@]}; do
+fastqc -o ${projPath}/fastqFileQC/${org} -t 60 -f fastq ${projPath}/data/${org}/R1.fastq.gz
+fastqc -o ${projPath}/fastqFileQC/${org} -t 60 -f fastq ${projPath}/data/${org}/R2.fastq.gz
+done
+
+#去接头
+for org in ${group[@]}; do
+mkdir -p ${projPath}/data/trim/${org}
+trim_galore --phred33 -q 25 -j 8 --length 50 --stringency 3 --paired ${projPath}/data/${org}/R1.fastq.gz ${projPath}/data/${org}/R2.fastq.gz --gzip -o ${projPath}/data/trim/${org}
+done
+
+#再次质控
+for org in ${group[@]}; do
+mkdir -p ${projPath}/data/trim/fastqFileQC/${org}
+fastqc -o ${projPath}/data/trim/fastqFileQC/${org} --threads 60 -f fastq ${projPath}/data/trim/${org}/R1_val_1.fq.gz
+fastqc -o ${projPath}/data/trim/fastqFileQC/${org} --threads 60 -f fastq ${projPath}/data/trim/${org}/R2_val_2.fq.gz
+done
+
+#比对到基因组上
+#下载小鼠基因组
+mkdir -p ${projPath}/bowtie2Index/mm10
+mkdir -p ${projPath}/bowtie2Index/spike-in
+cd ${projPath}/bowtie2Index/mm10
+wget --no-check-certificate 
+https://hgdownload.soe.ucsc.edu/goldenPath/mm10/bigZips/mm10.fa.gz
+
+#构建基因目录 40核并行计算
+bowtie2-build --threads 40 ${projPath}/bowtie2Index/mm10/mm10.fa ${projPath}/bowtie2Index/mm10/mm10
+bowtie2-build  ${projPath}/bowtie2Index/spike-in.fa ${projPath}/bowtie2Index/spike-in/spike-in
+
+#开始比对小鼠基因组
+for org in ${group[@]}; do
+mkdir -p ${projPath}/alignment/sam/bowtie2_summary/${org}
+bowtie2 --local --very-sensitive --no-mixed --no-discordant --phred33 -I 10 -X 700 -p 90 -x ${projPath}/bowtie2Index/mm10/mm10 -1 ${projPath}/data/trim/${org}/R1_val_1.fq.gz -2 ${projPath}/data/trim/${org}/R2_val_2.fq.gz -S ${projPath}/alignment/sam/bowtie2_summary/${org}/bowtie2.sam &> ${projPath}/alignment/sam/bowtie2_summary/${org}/bowtie2.txt
+done
+
+#比对spikein基因组
+for org in ${group[@]}; do
+mkdir -p ${projPath}/alignment/sam/bowtie2_summary/spikein/${org}
+bowtie2 --local --very-sensitive --no-mixed --no-discordant --phred33 -I 10 -X 700 -p 90 -x ${projPath}/bowtie2Index/spikein/spikein -1 ${projPath}/data/trim/${org}/R1_val_1.fq.gz -2 ${projPath}/data/trim/${org}/R2_val_2.fq.gz -S ${projPath}/alignment/sam/bowtie2_summary/spikein/${org}/bowtie2.sam &> ${projPath}/alignment/sam/bowtie2_summary/spikein/${org}/bowtie2.txt
+done
+
+
+#过滤低质量序列
+for org in ${group[@]}; do
+mkdir -p ${projPath}/alignment/bam2/${org}
+samtools view -bS -F 0x04 -q 10 -@60 ${projPath}/alignment/sam/bowtie2_summary/${org}/bowtie2.sam > ${projPath}/alignment/bam4/${org}/bowtie2.redup.bam
+done
+
+#转化为bed文件,且保留位于同一染色体上且片段长度小于1000bp的读对。仅提取相关列的片段
+
+for org in ${group[@]}; do
+mkdir -p ${projPath}/alignment/bed/${org}
+bedtools bamtobed -bedpe -i ${projPath}/alignment/bam3/${org}/bowtie2.redup.bam > ${projPath}/alignment/bam3/${org}/${org}.bowtie2.bed
+awk '$1==$4 && $6-$2 < 1000 {print $0}' ${projPath}/alignment/bam3/${org}/${org}.bowtie2.bed > ${projPath}/alignment/bam3/${org}/${org}.bowtie2.clean.bed
+cut -f 1,2,6 ${projPath}/alignment/bam3/${org}/${org}.bowtie2.clean.bed | sort -k1,1 -k2,2n -k3,3n > ${projPath}/alignment/bam3/${org}/${org}.bowtie2.fragments.bed
+done
+
+#根据spikein标准化
+#添加DNA-spikein的长度
+projPath="/home/wyydata/wangyuyao/CUT_TAG_Exp" 
+group=("H3K9ac_Pi1" "H3K9ac_Pi2" "Pi_IgG" "H3K9ac_D1" "H3K9ac_D2" "Drug_IgG")
+for org in ${group[@]}; do
+mkdir -p ${projPath}/alignment/spikeindepth/${org}
+echo $(($(samtools view -F 0x04 ${projPath}/alignment/sam/bowtie2_summary/spikein/${org}/bowtie2.sam|wc -l)/2)) > ${projPath}/alignment/spikeindepth/${org}/bowtie2_spikein.seqDepth
+done
+
+#添加整个基因组的长度
+projPath="/home/wyydata/wangyuyao/CUT_TAG_Exp"
+cd ${projPath}/bowtie2Index
+samtools faidx mm10.fa
+cut mm10.fa.fai -f1,2 > mm10.chrom.sizes
+chromSize="/home/wyydata/wangyuyao/CUT_TAG_Exp/bowtie2Index/mm10.chrom.sizes"
+
+#进行scale factor标准化
+projPath="/home/wyydata/wangyuyao/CUT_TAG_Exp"
+group=("H3K9ac_Pi1" "H3K9ac_Pi2" "Pi_IgG" "H3K9ac_D1" "H3K9ac_D2" "Drug_IgG")
+chromSize="/home/wyydata/wangyuyao/CUT_TAG_Exp/bowtie2Index/mm10.chrom.sizes"
+for org in ${group[@]};
+do
+chmod u+x ${projPath}/alignment/spikeindepth/${org}/bowtie2_spikein.seqDepth
+seqDepth=$(cat ${projPath}/alignment/spikeindepth/${org}/bowtie2_spikein.seqDepth)
+if [[ "$seqDepth" -gt "1" ]]
+then
+scale_factor=$(echo "10000 / $seqDepth" | bc -l)
+echo "Scaling factor for ${projPath}/alignment/spikeindepth/${org}/bowtie2_spikein.seqDepth is: $scale_factor"
+bedtools genomecov -bg -scale $scale_factor -i ${projPath}/alignment/bam3/${org}/${org}.bowtie2.fragments.bed -g $chromSize > ${projPath}/alignment/bam3/${org}/${org}_bowtie2.fragments.normalized.bedgraph
+fi
+done
+
+#SEACR进行peakcalling
+projPath="/home/wyydata/wangyuyao/CUT_TAG_Exp"
+seacr="/home/wyydata/wangyuyao/miniconda3/envs/cuttag/bin/SEACR_1.3.sh"
+group=("H3K9ac_Pi1" "H3K9ac_Pi2")
+for org in ${group[@]}; do
+mkdir -p ${projPath}/peakcalling/${org}
+bash $seacr ${projPath}/alignment/bam3/${org}/${org}_bowtie2.fragments.normalized.bedgraph ${projPath}/alignment/bam3/Pi_IgG/Pi_IgG_bowtie2.fragments.normalized.bedgraph non stringent ${projPath}/peakcalling/${org}/${org}_seacr2_top0.01.peaks
+done
+group=("H3K9ac_D1" "H3K9ac_D2")
+for org in ${group[@]}; do
+mkdir -p ${projPath}/peakcalling/${org}
+bash $seacr ${projPath}/alignment/bam3/${org}/${org}_bowtie2.fragments.normalized.bedgraph ${projPath}/alignment/bam3/Drug_IgG/Drug_IgG_bowtie2.fragments.normalized.bedgraph non stringent ${projPath}/peakcalling/${org}/${org}_seacr2_top0.01.peaks
+done
+
+#热图可视化特异性区域
+projPath="/home/wyydata/wangyuyao/CUT_TAG_Exp"
+group=("H3K9ac_Pi1" "H3K9ac_Pi2" "H3K9ac_D1" "H3K9ac_D2")
+for org in ${group[@]}; do
+mkdir -p ${projPath}/heatmap/${org}
+samtools sort -@60 -o ${projPath}/heatmap/${org}/${org}_sorted.bam ${projPath}/alignment/bam4/${org}/bowtie2.redup.bam
+samtools index -@60 ${projPath}/heatmap/${org}/${org}_sorted.bam
+chmod u+x ${projPath}/alignment/spikeindepth/${org}/bowtie2_spikein.seqDepth
+seqDepth=$(cat ${projPath}/alignment/spikeindepth/${org}/bowtie2_spikein.seqDepth)
+if [[ "$seqDepth" -gt "1" ]]
+then
+scale_factor=$(echo "10000 / $seqDepth" | bc -l)
+echo "Scaling factor for ${projPath}/alignment/spikeindepth/${org}/bowtie2_spikein.seqDepth is: $scale_factor"
+bamCoverage -b -@ 60 ${projPath}/heatmap/${org}/${org}_sorted.bam --scaleFactor $scale_factor -o ${projPath}/heatmap/${org}/${org}_raw.bw
+fi
+done
+
+projPath="/home/wyydata/wangyuyao/CUT_TAG_Exp"
+group=("H3K9ac_Pi1" "H3K9ac_Pi2" "H3K9ac_D1" "H3K9ac_D2")
+for org in ${group[@]}; do
+computeMatrix reference-point -S ${projPath}/heatmap/${org}/${org}_raw.bw -R ${projPath}/peakcalling/${org}/${org}_seacr_control.peaks.summitRegion.bed --skipZeros -o ${projPath}/heatmap/${org}/${org}_SEACR.mat.gz -p 90 -a 3000 -b 3000 --referencePoint center --missingDataAsZero
+plotHeatmap -m ${projPath}/heatmap/${org}/${org}_SEACR.mat.gz -o ${projPath}/heatmap/${org}/${org}_SEACR.heatmap.png --sortUsing sum --startLabel "Peak Start" --endLabel "Peak End" --xAxisLabel "" --regionsLabel "Peaks" --samplesLabel "${org}"
+done
+
+projPath="/home/wyydata/wangyuyao/CUT_TAG_Exp"
+computeMatrix scale-regions -S ${projPath}/heatmap/H3K9ac_Pi1/H3K9ac_Pi1_raw.bw \
+                               ${projPath}/heatmap/H3K9ac_Pi2/H3K9ac_Pi2_raw.bw \
+                               ${projPath}/heatmap/H3K9ac_D1/H3K9ac_D1_raw.bw \
+                               ${projPath}/heatmap/H3K9ac_D2/H3K9ac_D2_raw.bw \
+                              -R ${projPath}/CUT_TAG_Exp/bowtie2Index/mm10.ref.bed \
+                              --beforeRegionStartLength 3000 \
+                              --regionBodyLength 5000 \
+                              --afterRegionStartLength 3000 \
+                              --skipZeros -o ${projPath}/heatmap/gene.mat.gz -p 90
+plotHeatmap -m ${projPath}/heatmap/gene.mat.gz -o ${projPath}/heatmap/gene.heatmap.png --sortUsing sum
